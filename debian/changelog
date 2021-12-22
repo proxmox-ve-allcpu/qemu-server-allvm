@@ -1,3 +1,9 @@
+qemu-server-allvms (7.1-4-allvms) bullseye; urgency=medium
+
+  * Append initial supported for other vm types
+
+ -- Verdgil <proxmox_allvms@gurov.eu>  Thu, 23 Dec 2021 01:43:00 +0300
+
 qemu-server (7.1-4) bullseye; urgency=medium
 
   * migrate: send updated TPM state volume ID to target node on local-storage
