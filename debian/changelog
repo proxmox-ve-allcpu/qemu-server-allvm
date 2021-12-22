@@ -1,4 +1,4 @@
-qemu-server-allvms (7.1-4-allvms) bullseye; urgency=medium
+qemu-server (7.1-4-allvms) bullseye; urgency=medium
 
   * Append initial supported for other vm types
 
