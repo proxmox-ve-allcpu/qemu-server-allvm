@@ -150,7 +150,8 @@ sub register_command {
 	properties => {
 	    node => get_standard_option('pve-node'),
 	    vmid => get_standard_option('pve-vmid', {
-		    completion => \&PVE::QemuServer::complete_vmid_running }),
+		completion => \&PVE::QemuServer::complete_vmid_running,
+	    }),
 	    command => {
 		type => 'string',
 		description => "The QGA command.",
@@ -470,9 +471,16 @@ __PACKAGE__->register_method({
 	    },
 	    content => {
 		type => 'string',
-		maxLength => 60*1024, # 60k, smaller than our 64k POST limit
+		maxLength => 60 * 1024, # 60k, smaller than our 64k POST limit
 		description => "The content to write into the file."
-	    }
+	    },
+	    encode => {
+		type => 'boolean',
+		description => "If set, the content will be encoded as base64 (required by QEMU)."
+		    ."Otherwise the content needs to be encoded beforehand - defaults to true.",
+		optional => 1,
+		default => 1,
+	    },
 	},
     },
     returns => { type => 'null' },
@@ -480,7 +488,8 @@ __PACKAGE__->register_method({
 	my ($param) = @_;
 
 	my $vmid = $param->{vmid};
-	my $buf = encode_base64($param->{content});
+
+	my $buf = ($param->{encode} // 1) ? encode_base64($param->{content}) : $param->{content};
 
 	my $qgafh = agent_cmd($vmid, "file-open",  { path => $param->{file}, mode => 'wb' }, "can't open file");
 	my $write = agent_cmd($vmid, "file-write", { handle => $qgafh, 'buf-b64' => $buf }, "can't write to file");

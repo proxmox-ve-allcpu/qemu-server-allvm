@@ -119,21 +119,6 @@ PVE::JSONSchema::register_standard_option('pve-qemu-machine', {
 	optional => 1,
 });
 
-
-sub map_storage {
-    my ($map, $source) = @_;
-
-    return $source if !defined($map);
-
-    return $map->{entries}->{$source}
-	if $map->{entries} && defined($map->{entries}->{$source});
-
-    return $map->{default} if $map->{default};
-
-    # identity (fallback)
-    return $source;
-}
-
 PVE::JSONSchema::register_standard_option('pve-targetstorage', {
     description => "Mapping from source to target storages. Providing only a single storage ID maps all source storages to that storage. Providing the special value '1' will map each source storage to itself.",
     type => 'string',
@@ -351,7 +336,7 @@ my $confdesc = {
 	verbose_description => "CPU weight for a VM. Argument is used in the kernel fair scheduler."
 	    ." The larger the number is, the more CPU time this VM gets. Number is relative to"
 	    ." weights of all the other running VMs.",
-	minimum => 2,
+	minimum => 1,
 	maximum => 262144,
 	default => 'cgroup v1: 1024, cgroup v2: 100',
     },
@@ -929,13 +914,10 @@ my $net_fmt = {
         default_key => 1,
     },
     (map { $_ => { keyAlias => 'model', alias => 'macaddr' }} @$nic_model_list),
-    bridge => {
-	type => 'string',
+    bridge => get_standard_option('pve-bridge-id', {
 	description => $net_fmt_bridge_descr,
-	format_description => 'bridge',
-	pattern => '[-_.\w\d]+',
 	optional => 1,
-    },
+    }),
     queues => {
 	type => 'integer',
 	minimum => 0, maximum => 16,
@@ -2330,7 +2312,7 @@ sub destroy_vm {
 }
 
 sub parse_vm_config {
-    my ($filename, $raw) = @_;
+    my ($filename, $raw, $strict) = @_;
 
     return if !defined($raw);
 
@@ -2338,6 +2320,16 @@ sub parse_vm_config {
 	digest => Digest::SHA::sha1_hex($raw),
 	snapshots => {},
 	pending => {},
+    };
+
+    my $handle_error = sub {
+	my ($msg) = @_;
+
+	if ($strict) {
+	    die $msg;
+	} else {
+	    warn $msg;
+	}
     };
 
     $filename =~ m|/qemu-server/(\d+)\.conf$|
@@ -2394,14 +2386,14 @@ sub parse_vm_config {
 	    if ($section eq 'pending') {
 		$conf->{delete} = $value; # we parse this later
 	    } else {
-		warn "vm $vmid - propertry 'delete' is only allowed in [PENDING]\n";
+		$handle_error->("vm $vmid - property 'delete' is only allowed in [PENDING]\n");
 	    }
 	} elsif ($line =~ m/^([a-z][a-z_]*\d*):\s*(.+?)\s*$/) {
 	    my $key = $1;
 	    my $value = $2;
 	    eval { $value = check_type($key, $value); };
 	    if ($@) {
-		warn "vm $vmid - unable to parse value of '$key' - $@";
+		$handle_error->("vm $vmid - unable to parse value of '$key' - $@");
 	    } else {
 		$key = 'ide2' if $key eq 'cdrom';
 		my $fmt = $confdesc->{$key}->{format};
@@ -2411,7 +2403,7 @@ sub parse_vm_config {
 			$v->{file} = $volid;
 			$value = print_drive($v);
 		    } else {
-			warn "vm $vmid - unable to parse value of '$key'\n";
+			$handle_error->("vm $vmid - unable to parse value of '$key'\n");
 			next;
 		    }
 		}
@@ -2419,7 +2411,7 @@ sub parse_vm_config {
 		$conf->{$key} = $value;
 	    }
 	} else {
-	    warn "vm $vmid - unable to parse config: $line\n";
+	    $handle_error->("vm $vmid - unable to parse config: $line\n");
 	}
     }
 
@@ -3430,7 +3422,17 @@ sub query_understood_cpu_flags {
 
 my sub get_cpuunits {
     my ($conf) = @_;
-    return $conf->{cpuunits} // (PVE::CGroup::cgroup_mode() == 2 ? 100 : 1024);
+    my $is_cgroupv2 = PVE::CGroup::cgroup_mode() == 2;
+
+    my $cpuunits = $conf->{cpuunits};
+    return $is_cgroupv2 ? 100 : 1024 if !defined($cpuunits);
+
+    if ($is_cgroupv2) {
+	$cpuunits = 10000 if $cpuunits >= 10000; # v1 can be higher, so clamp v2 there
+    } else {
+	$cpuunits = 2 if $cpuunits < 2; # v2 can be lower, so clamp v1 there
+    }
+    return $cpuunits;
 }
 
 # Since commit 277d33454f77ec1d1e0bc04e37621e4dd2424b67 in pve-qemu, smm is not off by default
@@ -3507,8 +3509,6 @@ sub config_to_command {
     my $hotplug_features = parse_hotplug_features(defined($conf->{hotplug}) ? $conf->{hotplug} : '1');
     my $use_old_bios_files = undef;
     ($use_old_bios_files, $machine_type) = qemu_use_old_bios_files($machine_type);
-
-    my $cpuunits = get_cpuunits($conf);
 
     push @$cmd, $kvm_binary;
 
@@ -4962,7 +4962,8 @@ sub vmconfig_hotplug_pending {
 		die "skip\n" if !$hotplug_features->{memory};
 		$value = PVE::QemuServer::Memory::qemu_memory_hotplug($vmid, $conf, $defaults, $opt, $value);
 	    } elsif ($opt eq 'cpuunits') {
-		$cgroup->change_cpu_shares($conf->{pending}->{$opt}, 1024);
+		my $new_cpuunits = get_cpuunits({ $opt => $conf->{pending}->{$opt} }); # to clamp
+		$cgroup->change_cpu_shares($new_cpuunits, 1024);
 	    } elsif ($opt eq 'cpulimit') {
 		my $cpulimit = $conf->{pending}->{$opt} == 0 ? -1 : int($conf->{pending}->{$opt} * 100000);
 		$cgroup->change_cpu_quota($cpulimit, 100000);
@@ -5291,11 +5292,9 @@ sub vm_migrate_get_nbd_disks {
 sub vm_migrate_alloc_nbd_disks {
     my ($storecfg, $vmid, $source_volumes, $storagemap) = @_;
 
-    my $format = undef;
-
     my $nbd = {};
     foreach my $opt (sort keys %$source_volumes) {
-	my ($volid, $storeid, $volname, $drive, $use_existing) = @{$source_volumes->{$opt}};
+	my ($volid, $storeid, $volname, $drive, $use_existing, $format) = @{$source_volumes->{$opt}};
 
 	if ($use_existing) {
 	    $nbd->{$opt}->{drivestr} = print_drive($drive);
@@ -5304,16 +5303,26 @@ sub vm_migrate_alloc_nbd_disks {
 	    next;
 	}
 
-	# If a remote storage is specified and the format of the original
-	# volume is not available there, fall back to the default format.
-	# Otherwise use the same format as the original.
+	# storage mapping + volname = regular migration
+	# storage mapping + format = remote migration
+	# order of precedence, filtered by whether storage supports it:
+	# 1. explicit requested format
+	# 2. format of current volume
+	# 3. default format of storage
 	if (!$storagemap->{identity}) {
-	    $storeid = map_storage($storagemap, $storeid);
+	    $storeid = PVE::JSONSchema::map_id($storagemap, $storeid);
 	    my ($defFormat, $validFormats) = PVE::Storage::storage_default_format($storecfg, $storeid);
-	    my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
-	    my $fileFormat = qemu_img_format($scfg, $volname);
-	    $format = (grep {$fileFormat eq $_} @{$validFormats}) ? $fileFormat : $defFormat;
+	    if (!$format || !grep { $format eq $_ } @$validFormats) {
+		if ($volname) {
+		    my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
+		    my $fileFormat = qemu_img_format($scfg, $volname);
+		    $format = $fileFormat
+			if grep { $fileFormat eq $_ } @$validFormats;
+		}
+		$format //= $defFormat;
+	    }
 	} else {
+	    # can't happen for remote migration, so $volname is always defined
 	    my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
 	    $format = qemu_img_format($scfg, $volname);
 	}
@@ -5596,7 +5605,6 @@ sub vm_start_nolock {
     );
 
     if (PVE::CGroup::cgroup_mode() == 2) {
-	$cpuunits = 10000 if $cpuunits >= 10000; # else we get an error
 	$systemd_properties{CPUWeight} = $cpuunits;
     } else {
 	$systemd_properties{CPUShares} = $cpuunits;
@@ -7495,9 +7503,11 @@ sub qemu_drive_mirror_monitor {
 		    if ($agent_running) {
 			print "freeze filesystem\n";
 			eval { mon_cmd($vmid, "guest-fsfreeze-freeze"); };
+			warn $@ if $@;
 		    } else {
 			print "suspend vm\n";
 			eval { PVE::QemuServer::vm_suspend($vmid, 1); };
+			warn $@ if $@;
 		    }
 
 		    # if we clone a disk for a new target vm, we don't switch the disk
@@ -7506,9 +7516,11 @@ sub qemu_drive_mirror_monitor {
 		    if ($agent_running) {
 			print "unfreeze filesystem\n";
 			eval { mon_cmd($vmid, "guest-fsfreeze-thaw"); };
+			warn $@ if $@;
 		    } else {
 			print "resume vm\n";
-			eval {  PVE::QemuServer::vm_resume($vmid, 1, 1); };
+			eval { PVE::QemuServer::vm_resume($vmid, 1, 1); };
+			warn $@ if $@;
 		    }
 
 		    last;
@@ -7610,6 +7622,7 @@ sub clone_disk {
 	} elsif ($drivename eq 'efidisk0') {
 	    $size = get_efivars_size($conf);
 	} elsif ($drivename eq 'tpmstate0') {
+	    $dst_format = 'raw';
 	    $size = PVE::QemuServer::Drive::TPMSTATE_DISK_SIZE;
 	} else {
 	    ($size) = PVE::Storage::volume_size_info($storecfg, $drive->{file}, 10);
@@ -7667,8 +7680,8 @@ sub clone_disk {
 no_data_clone:
     my ($size) = eval { PVE::Storage::volume_size_info($storecfg, $newvolid, 10) };
 
-    my $disk = $drive;
-    $disk->{format} = undef;
+    my $disk = dclone($drive);
+    delete $disk->{format};
     $disk->{file} = $newvolid;
     $disk->{size} = $size if defined($size);
 

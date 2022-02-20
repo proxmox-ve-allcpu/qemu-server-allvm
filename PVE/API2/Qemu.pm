@@ -1411,7 +1411,7 @@ my $update_vm_api  = sub {
 			if ($new_bootcfg->{order}) {
 			    my @devs = PVE::Tools::split_list($new_bootcfg->{order});
 			    for my $dev (@devs) {
-				my $exists = $conf->{$dev} || $conf->{pending}->{$dev};
+				my $exists = $conf->{$dev} || $conf->{pending}->{$dev} || $param->{$dev};
 				my $deleted = grep {$_ eq $dev} @delete;
 				die "invalid bootorder: device '$dev' does not exist'\n"
 				    if !$exists || $deleted;
@@ -3046,7 +3046,6 @@ __PACKAGE__->register_method({
 	my $vmid = extract_param($param, 'vmid');
 	my $newid = extract_param($param, 'newid');
 	my $pool = extract_param($param, 'pool');
-	$rpcenv->check_pool_exist($pool) if defined($pool);
 
         my $snapname = extract_param($param, 'snapname');
 	my $storage = extract_param($param, 'storage');
@@ -3059,28 +3058,28 @@ __PACKAGE__->register_method({
 	    undef $target;
 	}
 
-	PVE::Cluster::check_node_exists($target) if $target;
-
-	my $storecfg = PVE::Storage::config();
-
-	if ($storage) {
-	    # check if storage is enabled on local node
-	    PVE::Storage::storage_check_enabled($storecfg, $storage);
-	    if ($target) {
-		# check if storage is available on target node
-		PVE::Storage::storage_check_enabled($storecfg, $storage, $target);
-		# clone only works if target storage is shared
-		my $scfg = PVE::Storage::storage_config($storecfg, $storage);
-		die "can't clone to non-shared storage '$storage'\n" if !$scfg->{shared};
-	    }
-	}
-
-	PVE::Cluster::check_cfs_quorum();
-
 	my $running = PVE::QemuServer::check_running($vmid) || 0;
 
-	my $clonefn = sub {
-	    # do all tests after lock but before forking worker - if possible
+	my $load_and_check = sub {
+	    $rpcenv->check_pool_exist($pool) if defined($pool);
+	    PVE::Cluster::check_node_exists($target) if $target;
+
+	    my $storecfg = PVE::Storage::config();
+
+	    if ($storage) {
+		# check if storage is enabled on local node
+		PVE::Storage::storage_check_enabled($storecfg, $storage);
+		if ($target) {
+		    # check if storage is available on target node
+		    PVE::Storage::storage_check_enabled($storecfg, $storage, $target);
+		    # clone only works if target storage is shared
+		    my $scfg = PVE::Storage::storage_config($storecfg, $storage);
+		    die "can't clone to non-shared storage '$storage'\n"
+			if !$scfg->{shared};
+		}
+	    }
+
+	    PVE::Cluster::check_cfs_quorum();
 
 	    my $conf = PVE::QemuConfig->load_config($vmid);
 	    PVE::QemuConfig->check_lock($conf);
@@ -3091,7 +3090,7 @@ __PACKAGE__->register_method({
 	    die "snapshot '$snapname' does not exist\n"
 		if $snapname && !defined( $conf->{snapshots}->{$snapname});
 
-	    my $full = extract_param($param, 'full') // !PVE::QemuConfig->is_template($conf);
+	    my $full = $param->{full} // !PVE::QemuConfig->is_template($conf);
 
 	    die "parameter 'storage' not allowed for linked clones\n"
 		if defined($storage) && !$full;
@@ -3156,7 +3155,14 @@ __PACKAGE__->register_method({
 		}
 	    }
 
-            # auto generate a new uuid
+	    return ($conffile, $newconf, $oldconf, $vollist, $drives, $fullclone);
+	};
+
+	my $clonefn = sub {
+	    my ($conffile, $newconf, $oldconf, $vollist, $drives, $fullclone) = $load_and_check->();
+	    my $storecfg = PVE::Storage::config();
+
+	    # auto generate a new uuid
 	    my $smbios1 = PVE::QemuServer::parse_smbios1($newconf->{smbios1} || '');
 	    $smbios1->{uuid} = PVE::QemuServer::generate_uuid();
 	    $newconf->{smbios1} = PVE::QemuServer::print_smbios1($smbios1);
@@ -3181,105 +3187,99 @@ __PACKAGE__->register_method({
 	    # FIXME use PVE::QemuConfig->create_and_lock_config and adapt code
 	    PVE::Tools::file_set_contents($conffile, "# qmclone temporary file\nlock: clone\n");
 
-	    my $realcmd = sub {
-		my $upid = shift;
-
-		my $newvollist = [];
-		my $jobs = {};
-
-		eval {
-		    local $SIG{INT} =
-			local $SIG{TERM} =
-			local $SIG{QUIT} =
-			local $SIG{HUP} = sub { die "interrupted by signal\n"; };
-
-		    PVE::Storage::activate_volumes($storecfg, $vollist, $snapname);
-
-		    my $bwlimit = extract_param($param, 'bwlimit');
-
-		    my $total_jobs = scalar(keys %{$drives});
-		    my $i = 1;
-
-		    foreach my $opt (sort keys %$drives) {
-			my $drive = $drives->{$opt};
-			my $skipcomplete = ($total_jobs != $i); # finish after last drive
-			my $completion = $skipcomplete ? 'skip' : 'complete';
-
-			my $src_sid = PVE::Storage::parse_volume_id($drive->{file});
-			my $storage_list = [ $src_sid ];
-			push @$storage_list, $storage if defined($storage);
-			my $clonelimit = PVE::Storage::get_bandwidth_limit('clone', $storage_list, $bwlimit);
-
-			my $newdrive = PVE::QemuServer::clone_disk(
-			    $storecfg,
-			    $vmid,
-			    $running,
-			    $opt,
-			    $drive,
-			    $snapname,
-			    $newid,
-			    $storage,
-			    $format,
-			    $fullclone->{$opt},
-			    $newvollist,
-			    $jobs,
-			    $completion,
-			    $oldconf->{agent},
-			    $clonelimit,
-			    $oldconf
-			);
-
-			$newconf->{$opt} = PVE::QemuServer::print_drive($newdrive);
-
-			PVE::QemuConfig->write_config($newid, $newconf);
-			$i++;
-		    }
-
-		    delete $newconf->{lock};
-
-		    # do not write pending changes
-		    if (my @changes = keys %{$newconf->{pending}}) {
-			my $pending = join(',', @changes);
-			warn "found pending changes for '$pending', discarding for clone\n";
-			delete $newconf->{pending};
-		    }
-
-		    PVE::QemuConfig->write_config($newid, $newconf);
-
-                    if ($target) {
-			# always deactivate volumes - avoid lvm LVs to be active on several nodes
-			PVE::Storage::deactivate_volumes($storecfg, $vollist, $snapname) if !$running;
-			PVE::Storage::deactivate_volumes($storecfg, $newvollist);
-
-			my $newconffile = PVE::QemuConfig->config_file($newid, $target);
-			die "Failed to move config to node '$target' - rename failed: $!\n"
-			    if !rename($conffile, $newconffile);
-		    }
-
-		    PVE::AccessControl::add_vm_to_pool($newid, $pool) if $pool;
-		};
-		if (my $err = $@) {
-		    eval { PVE::QemuServer::qemu_blockjobs_cancel($vmid, $jobs) };
-		    sleep 1; # some storage like rbd need to wait before release volume - really?
-
-		    foreach my $volid (@$newvollist) {
-			eval { PVE::Storage::vdisk_free($storecfg, $volid); };
-			warn $@ if $@;
-		    }
-
-		    PVE::Firewall::remove_vmfw_conf($newid);
-
-		    unlink $conffile; # avoid races -> last thing before die
-
-		    die "clone failed: $err";
-		}
-
-		return;
-	    };
-
 	    PVE::Firewall::clone_vmfw_conf($vmid, $newid);
 
-	    return $rpcenv->fork_worker('qmclone', $vmid, $authuser, $realcmd);
+	    my $newvollist = [];
+	    my $jobs = {};
+
+	    eval {
+		local $SIG{INT} =
+		    local $SIG{TERM} =
+		    local $SIG{QUIT} =
+		    local $SIG{HUP} = sub { die "interrupted by signal\n"; };
+
+		PVE::Storage::activate_volumes($storecfg, $vollist, $snapname);
+
+		my $bwlimit = extract_param($param, 'bwlimit');
+
+		my $total_jobs = scalar(keys %{$drives});
+		my $i = 1;
+
+		foreach my $opt (sort keys %$drives) {
+		    my $drive = $drives->{$opt};
+		    my $skipcomplete = ($total_jobs != $i); # finish after last drive
+		    my $completion = $skipcomplete ? 'skip' : 'complete';
+
+		    my $src_sid = PVE::Storage::parse_volume_id($drive->{file});
+		    my $storage_list = [ $src_sid ];
+		    push @$storage_list, $storage if defined($storage);
+		    my $clonelimit = PVE::Storage::get_bandwidth_limit('clone', $storage_list, $bwlimit);
+
+		    my $newdrive = PVE::QemuServer::clone_disk(
+			$storecfg,
+			$vmid,
+			$running,
+			$opt,
+			$drive,
+			$snapname,
+			$newid,
+			$storage,
+			$format,
+			$fullclone->{$opt},
+			$newvollist,
+			$jobs,
+			$completion,
+			$oldconf->{agent},
+			$clonelimit,
+			$oldconf
+		    );
+
+		    $newconf->{$opt} = PVE::QemuServer::print_drive($newdrive);
+
+		    PVE::QemuConfig->write_config($newid, $newconf);
+		    $i++;
+		}
+
+		delete $newconf->{lock};
+
+		# do not write pending changes
+		if (my @changes = keys %{$newconf->{pending}}) {
+		    my $pending = join(',', @changes);
+		    warn "found pending changes for '$pending', discarding for clone\n";
+		    delete $newconf->{pending};
+		}
+
+		PVE::QemuConfig->write_config($newid, $newconf);
+
+		if ($target) {
+		    # always deactivate volumes - avoid lvm LVs to be active on several nodes
+		    PVE::Storage::deactivate_volumes($storecfg, $vollist, $snapname) if !$running;
+		    PVE::Storage::deactivate_volumes($storecfg, $newvollist);
+
+		    my $newconffile = PVE::QemuConfig->config_file($newid, $target);
+		    die "Failed to move config to node '$target' - rename failed: $!\n"
+			if !rename($conffile, $newconffile);
+		}
+
+		PVE::AccessControl::add_vm_to_pool($newid, $pool) if $pool;
+	    };
+	    if (my $err = $@) {
+		eval { PVE::QemuServer::qemu_blockjobs_cancel($vmid, $jobs) };
+		sleep 1; # some storage like rbd need to wait before release volume - really?
+
+		foreach my $volid (@$newvollist) {
+		    eval { PVE::Storage::vdisk_free($storecfg, $volid); };
+		    warn $@ if $@;
+		}
+
+		PVE::Firewall::remove_vmfw_conf($newid);
+
+		unlink $conffile; # avoid races -> last thing before die
+
+		die "clone failed: $err";
+	    }
+
+	    return;
 	};
 
 	# Aquire exclusive lock lock for $newid
@@ -3287,12 +3287,18 @@ __PACKAGE__->register_method({
 	    return PVE::QemuConfig->lock_config_full($newid, 1, $clonefn);
 	};
 
-	# exclusive lock if VM is running - else shared lock is enough;
-	if ($running) {
-	    return PVE::QemuConfig->lock_config_full($vmid, 1, $lock_target_vm);
-	} else {
-	    return PVE::QemuConfig->lock_config_shared($vmid, 1, $lock_target_vm);
-	}
+	my $lock_source_vm = sub {
+	    # exclusive lock if VM is running - else shared lock is enough;
+	    if ($running) {
+		return PVE::QemuConfig->lock_config_full($vmid, 1, $lock_target_vm);
+	    } else {
+		return PVE::QemuConfig->lock_config_shared($vmid, 1, $lock_target_vm);
+	    }
+	};
+
+	$load_and_check->(); # early checks before forking/locking
+
+	return $rpcenv->fork_worker('qmclone', $vmid, $authuser, $lock_source_vm);
     }});
 
 __PACKAGE__->register_method({
@@ -3392,7 +3398,7 @@ __PACKAGE__->register_method({
 
 	my $storecfg = PVE::Storage::config();
 
-	my $move_updatefn =  sub {
+	my $load_and_check_move = sub {
 	    my $conf = PVE::QemuConfig->load_config($vmid);
 	    PVE::QemuConfig->check_lock($conf);
 
@@ -3412,8 +3418,8 @@ __PACKAGE__->register_method({
 		$oldfmt = $1;
 	    }
 
-	    die "you can't move to the same storage with same format\n" if $oldstoreid eq $storeid &&
-                (!$format || !$oldfmt || $oldfmt eq $format);
+	    die "you can't move to the same storage with same format\n"
+		if $oldstoreid eq $storeid && (!$format || !$oldfmt || $oldfmt eq $format);
 
 	    # this only checks snapshots because $disk is passed!
 	    my $snapshotted = PVE::QemuServer::Drive::is_volume_in_use(
@@ -3425,6 +3431,13 @@ __PACKAGE__->register_method({
 	    die "you can't move a disk with snapshots and delete the source\n"
 		if $snapshotted && $param->{delete};
 
+	    return ($conf, $drive, $oldstoreid, $snapshotted);
+	};
+
+	my $move_updatefn = sub {
+	    my ($conf, $drive, $oldstoreid, $snapshotted) = $load_and_check_move->();
+	    my $old_volid = $drive->{file};
+
 	    PVE::Cluster::log_msg(
 		'info',
 		$authuser,
@@ -3435,83 +3448,79 @@ __PACKAGE__->register_method({
 
 	    PVE::Storage::activate_volumes($storecfg, [ $drive->{file} ]);
 
-	    my $realcmd = sub {
-		my $newvollist = [];
+	    my $newvollist = [];
+
+	    eval {
+		local $SIG{INT} =
+		    local $SIG{TERM} =
+		    local $SIG{QUIT} =
+		    local $SIG{HUP} = sub { die "interrupted by signal\n"; };
+
+		warn "moving disk with snapshots, snapshots will not be moved!\n"
+		    if $snapshotted;
+
+		my $bwlimit = extract_param($param, 'bwlimit');
+		my $movelimit = PVE::Storage::get_bandwidth_limit(
+		    'move',
+		    [$oldstoreid, $storeid],
+		    $bwlimit
+		);
+
+		my $newdrive = PVE::QemuServer::clone_disk(
+		    $storecfg,
+		    $vmid,
+		    $running,
+		    $disk,
+		    $drive,
+		    undef,
+		    $vmid,
+		    $storeid,
+		    $format,
+		    1,
+		    $newvollist,
+		    undef,
+		    undef,
+		    undef,
+		    $movelimit,
+		    $conf,
+		);
+		$conf->{$disk} = PVE::QemuServer::print_drive($newdrive);
+
+		PVE::QemuConfig->add_unused_volume($conf, $old_volid) if !$param->{delete};
+
+		# convert moved disk to base if part of template
+		PVE::QemuServer::template_create($vmid, $conf, $disk)
+		    if PVE::QemuConfig->is_template($conf);
+
+		PVE::QemuConfig->write_config($vmid, $conf);
+
+		my $do_trim = PVE::QemuServer::get_qga_key($conf, 'fstrim_cloned_disks');
+		if ($running && $do_trim && PVE::QemuServer::qga_check_running($vmid)) {
+		    eval { mon_cmd($vmid, "guest-fstrim") };
+		}
 
 		eval {
-		    local $SIG{INT} =
-			local $SIG{TERM} =
-			local $SIG{QUIT} =
-			local $SIG{HUP} = sub { die "interrupted by signal\n"; };
-
-		    warn "moving disk with snapshots, snapshots will not be moved!\n"
-			if $snapshotted;
-
-		    my $bwlimit = extract_param($param, 'bwlimit');
-		    my $movelimit = PVE::Storage::get_bandwidth_limit(
-			'move',
-			[$oldstoreid, $storeid],
-			$bwlimit
-		    );
-
-		    my $newdrive = PVE::QemuServer::clone_disk(
-			$storecfg,
-			$vmid,
-			$running,
-			$disk,
-			$drive,
-			undef,
-			$vmid,
-			$storeid,
-			$format,
-			1,
-			$newvollist,
-			undef,
-			undef,
-			undef,
-			$movelimit,
-			$conf,
-		    );
-		    $conf->{$disk} = PVE::QemuServer::print_drive($newdrive);
-
-		    PVE::QemuConfig->add_unused_volume($conf, $old_volid) if !$param->{delete};
-
-		    # convert moved disk to base if part of template
-		    PVE::QemuServer::template_create($vmid, $conf, $disk)
-			if PVE::QemuConfig->is_template($conf);
-
-		    PVE::QemuConfig->write_config($vmid, $conf);
-
-		    my $do_trim = PVE::QemuServer::get_qga_key($conf, 'fstrim_cloned_disks');
-		    if ($running && $do_trim && PVE::QemuServer::qga_check_running($vmid)) {
-			eval { mon_cmd($vmid, "guest-fstrim") };
-		    }
-
-		    eval {
-			# try to deactivate volumes - avoid lvm LVs to be active on several nodes
-			PVE::Storage::deactivate_volumes($storecfg, [ $newdrive->{file} ])
-			    if !$running;
-		    };
-		    warn $@ if $@;
+		    # try to deactivate volumes - avoid lvm LVs to be active on several nodes
+		    PVE::Storage::deactivate_volumes($storecfg, [ $newdrive->{file} ])
+			if !$running;
 		};
-		if (my $err = $@) {
-		    foreach my $volid (@$newvollist) {
-			eval { PVE::Storage::vdisk_free($storecfg, $volid) };
-			warn $@ if $@;
-		    }
-		    die "storage migration failed: $err";
-                }
-
-		if ($param->{delete}) {
-		    eval {
-			PVE::Storage::deactivate_volumes($storecfg, [$old_volid]);
-			PVE::Storage::vdisk_free($storecfg, $old_volid);
-		    };
+		warn $@ if $@;
+	    };
+	    if (my $err = $@) {
+		foreach my $volid (@$newvollist) {
+		    eval { PVE::Storage::vdisk_free($storecfg, $volid) };
 		    warn $@ if $@;
 		}
-	    };
+		die "storage migration failed: $err";
+	    }
 
-            return $rpcenv->fork_worker('qmmove', $vmid, $authuser, $realcmd);
+	    if ($param->{delete}) {
+		eval {
+		    PVE::Storage::deactivate_volumes($storecfg, [$old_volid]);
+		    PVE::Storage::vdisk_free($storecfg, $old_volid);
+		};
+		warn $@ if $@;
+	    }
 	};
 
 	my $load_and_check_reassign_configs = sub {
@@ -3691,7 +3700,14 @@ __PACKAGE__->register_method({
 
 	    die "cannot move disk '$disk', only configured disks can be moved to another storage\n"
 		if $disk =~ m/^unused\d+$/;
-	    return PVE::QemuConfig->lock_config($vmid, $move_updatefn);
+
+	    $load_and_check_move->(); # early checks before forking/locking
+
+	    my $realcmd = sub {
+		PVE::QemuConfig->lock_config($vmid, $move_updatefn);
+	    };
+
+	    return $rpcenv->fork_worker('qmmove', $vmid, $authuser, $realcmd);
 	} else {
 	    my $msg = "both 'storage' and 'target-vmid' missing, either needs to be set";
 	    raise_param_exc({ 'target-vmid' => $msg, 'storage' => $msg });
