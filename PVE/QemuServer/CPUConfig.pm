@@ -609,7 +609,7 @@ sub get_cpu_options {
 			$arch ne 'rx' or
 			$arch ne 's390' or
 			$arch ne 'sh4' or
-			$arch ne 'sh4eb'
+			$arch ne 'sh4eb' # TODO: sparc, tricore, xtensa, xtensaeb
 	) {
 	die "internal error"; # should not happen
     }
