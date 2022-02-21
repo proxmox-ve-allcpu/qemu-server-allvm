@@ -1,12 +1,6 @@
-qemu-server (7.1-4-allvms-beta-1) bullseye; urgency=medium
+qemu-server (7.1-4.01) bullseye; urgency=medium
 
-  * Append cputype for some vm
-
- -- Verdgil <proxmox_allvms@gurov.eu>  Thu, 23 Dec 2021 01:43:00 +0300
-
-qemu-server (7.1-4-allvms) bullseye; urgency=medium
-
-  * Append initial supported for other vm types
+  * Append cputype for some vm (beta)
 
  -- Verdgil <proxmox_allvms@gurov.eu>  Thu, 23 Dec 2021 01:43:00 +0300
 
