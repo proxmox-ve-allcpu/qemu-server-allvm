@@ -455,9 +455,74 @@ sub get_cpu_options {
     my ($conf, $arch, $kvm, $kvm_off, $machine_version, $winversion, $gpu_passthrough) = @_;
 
     my $cputype = $kvm ? "kvm64" : "qemu64";
+	# ARM
     if ($arch eq 'aarch64') {
-	$cputype = 'cortex-a57';
+	$cputype = 'cortex-a72';
     }
+	if ($arch eq 'arm') {
+	$cputype = 'cortex-a57';
+	}
+	# MIPS
+	if ($arch eq 'mips' or $arch eq 'mipsel') {
+	$cputype = 'mips32r6-generic'
+	}
+	if ($arch eq 'mips64' or $arch eq 'mips64el') {
+	$cputype = 'MIPS64R2-generic'
+	}
+	# Alpha
+	if ($arch eq 'alpha') {
+	$cputype = 'ev68-alpha-cpu'
+	}
+	# AVR
+	if ($arch eq 'avr') {
+	$cputype = 'avr6-avr-cpu';
+	}
+	# CRIS
+	if ($arch eq 'cris') {
+	$cputype = 'crisv32';
+	}
+	# any type
+	if (
+		$arch eq 'hppa' or
+		$arch eq 'microblaze' or
+		$arch eq 'microblazeel' or
+		$arch eq 'nios2'
+	) {
+	$cputype = 'any';
+	}
+	# m68k
+	if ($arch eq 'hppa') {
+	$cputype = 'any';
+	}
+	# or1k
+	if ($arch eq 'or1k') {
+	$cputype = 'or1200';
+	}
+	# ppc
+	if ($arch eq 'ppc' or $arch eq 'ppc64') {
+	$cputype = 'g2ls';
+	}
+	# riscv32
+	if ($arch eq 'riscv32') {
+	$cputype = 'rv32';
+	}
+	# riscv32
+	if ($arch eq 'riscv64') {
+	$cputype = 'rv64';
+	}
+	# rx
+	if ($arch eq 'rx') {
+	$cputype = 'rx62n-rx-cpu';
+	}
+	# s390
+	if ($arch eq 's390') {
+	$cputype = 'gen16b';
+	}
+	# sh4
+	if ($arch eq 'sh4' or $arch eq 'sh4eb') {
+	$cputype = 'sh7785';
+	}
+	# TODO: sparc, tricore, xtensa, xtensaeb
 
     my $cpu = {};
     my $custom_cpu;
