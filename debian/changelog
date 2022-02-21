@@ -1,4 +1,4 @@
-qemu-server (7.1-4.01) bullseye; urgency=medium
+qemu-server (7.1-4.02) bullseye; urgency=medium
 
   * Append cputype for some vm (beta)
 

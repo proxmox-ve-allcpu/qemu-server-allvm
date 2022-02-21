@@ -88,6 +88,8 @@ my $cpu_vendor_list = {
     qemu32 => 'default',
     qemu64 => 'default',
     max => 'default',
+
+
 };
 
 my @supported_cpu_flags = (
@@ -584,7 +586,31 @@ sub get_cpu_options {
 	$pve_forced_flags->{'vendor'} = {
 	    value => $cpu_vendor,
 	} if $cpu_vendor ne 'default';
-    } elsif ($arch ne 'aarch64') {
+    } elsif (
+			$arch ne 'aarch64' or
+			$arch ne 'arm' or
+			$arch ne 'mips' or
+			$arch ne 'mipsel' or
+			$arch ne 'mips64' or
+			$arch ne 'mips64el' or
+			$arch ne 'alpha' or
+			$arch ne 'avr' or
+			$arch ne 'cris' or
+			$arch ne 'hppa' or
+			$arch ne 'microblaze' or
+			$arch ne 'microblazeel' or
+			$arch ne 'nios2' or
+			$arch ne 'hppa' or
+			$arch ne 'or1k' or
+			$arch ne 'ppc' or
+			$arch ne 'ppc64' or
+			$arch ne 'riscv32' or
+			$arch ne 'riscv64' or
+			$arch ne 'rx' or
+			$arch ne 's390' or
+			$arch ne 'sh4' or
+			$arch ne 'sh4eb'
+	) {
 	die "internal error"; # should not happen
     }
 
