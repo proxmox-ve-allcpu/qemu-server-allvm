@@ -587,29 +587,29 @@ sub get_cpu_options {
 	    value => $cpu_vendor,
 	} if $cpu_vendor ne 'default';
     } elsif (
-			$arch ne 'aarch64' or
-			$arch ne 'arm' or
-			$arch ne 'mips' or
-			$arch ne 'mipsel' or
-			$arch ne 'mips64' or
-			$arch ne 'mips64el' or
-			$arch ne 'alpha' or
-			$arch ne 'avr' or
-			$arch ne 'cris' or
-			$arch ne 'hppa' or
-			$arch ne 'microblaze' or
-			$arch ne 'microblazeel' or
-			$arch ne 'nios2' or
-			$arch ne 'hppa' or
-			$arch ne 'or1k' or
-			$arch ne 'ppc' or
-			$arch ne 'ppc64' or
-			$arch ne 'riscv32' or
-			$arch ne 'riscv64' or
-			$arch ne 'rx' or
-			$arch ne 's390' or
-			$arch ne 'sh4' or
-			$arch ne 'sh4eb' # TODO: sparc, tricore, xtensa, xtensaeb
+			$arch ne 'aarch64' and
+			$arch ne 'arm' and
+			$arch ne 'mips' and
+			$arch ne 'mipsel' and
+			$arch ne 'mips64' and
+			$arch ne 'mips64el' and
+			$arch ne 'alpha' and
+			$arch ne 'avr' and
+			$arch ne 'cris' and
+			$arch ne 'hppa' and
+			$arch ne 'microblaze' and
+			$arch ne 'microblazeel' and
+			$arch ne 'nios2' and
+			$arch ne 'hppa' and
+			$arch ne 'and1k' and
+			$arch ne 'ppc' and
+			$arch ne 'ppc64' and
+			$arch ne 'riscv32' and
+			$arch ne 'riscv64' and
+			$arch ne 'rx' and
+			$arch ne 's390' and
+			$arch ne 'sh4' and
+			$arch ne 'sh4eb' # TODO: sparc, tricande, xtensa, xtensaeb
 	) {
 	die "internal error"; # should not happen
     }
